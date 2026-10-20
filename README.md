@@ -34,7 +34,7 @@
 | `test-specs/{domain}/tests.md` | Тесты с **Observability Assertions** (спаны, метрики, логи, PII) |
 | `tasks.md` | Атомарные задачи (1 задача = 1 commit), связанные с FR/NFR/TM |
 | `apply.md` | Миграции, feature flags, canary deployment, **Observability Verification** |
-| `context.md` | Контекстный файл — состояние фичи, обновляется после каждого артефакта |
+| `context.md` | **Shared state** — обновляется после каждого артефакта, содержит накопительную Traceability Matrix. Единственный источник истины между модулями M1–M8. |
 
 ---
 
@@ -215,3 +215,119 @@ Canary deployment включает **автоматический rollback** п�
 | `traceability-matrix.template.md` | Traceability Matrix с инкрементальным накоплением |
 
 Используйте их как основу для новых проектов без копирования всего промпта.
+
+---
+
+## 🔄 Error Recovery
+
+Pipeline имеет встроенную обработку ошибок. Вот типичные сценарии:
+
+### SLO не заданы
+> **Сигнал:** `observability_context.slo` пуст
+> **Действие:** предложить baseline — p95 ≤ 500ms, availability ≥ 99%, error rate ≤ 1%
+> **Результат:** пользователь подтверждает или задаёт свои значения
+
+### Превышен лимит FR/NFR
+> **Сигнал:** 25 FR для домена `auth` (лимит 5–15)
+> **Действие:** предложить разделить на подфичи с новым domain
+> **Результат:** `auth-registration` + `auth-verification`
+
+### Threat Model не находит угроз
+> **Сигнал:** TM-матрица пуста
+> **Действие:** перепроверить `security_context`; при подтверждении — пометить `TM: no-relevant-threats` и продолжить
+
+### Конфликт TM vs Observability Contract
+> **Сигнал:** TM выявил PII в поле `user.email` в логе, но Observability Contract не предусматривает redaction
+> **Действие:** остановить pipeline, предложить 3 варианта:
+> 1. Добавить NFR-OBS на redaction (рекомендуется)
+> 2. Убрать поле из логов на уровне кода
+> 3. Повысить уровень шифрования телеметрии
+> **Результат:** пользователь выбирает вариант, pipeline продолжается
+
+### Отказ от артефакта
+> **Первый отказ:** задать 1 уточняющий вопрос, предложить 2 варианта
+> **Второй отказ на том же артефакте:** предложить упрощённую версию (simplified)
+> **Отказ на 2+ артефактах подряд:** перейти к `tasks` с пометкой `⚠️ skipped: <names>`
+> **Отказ на threat-model:** нельзя пропустить — minimum viable TM (Trust Boundaries + Top-3)
+
+---
+
+## 📋 Shared State: context.md
+
+Файл `context.md` — **единственный shared state** между модулями M1–M8.
+
+**Как работает:**
+1. После каждого артефакта AI обновляет `context.md`
+2. Содержимое передаётся как входные данные в следующий модуль
+3. **Traceability Matrix накапливается инкрементально** — после каждого шага добавляются новые строки
+4. В конце pipeline полная матрица выводится или запрашивается отдельно
+
+**Структура:**
+```markdown
+# Context
+## Feature: ...
+## Threat Model: методология + ключевые угрозы
+## Принятые ADR: список с TM-ссылками
+## Observability: стек, SLO, ключевые сигналы
+## Traceability Matrix (INCREMENTAL):
+| ID | Тип | Spec § | TM § | ADR | API | Task IDs | Test IDs | Verify |
+...
+```
+
+> **Важно:** `context.md` подаётся как входные данные в каждый следующий модуль.
+> Цитируйте только релевантные секции, чтобы не переполнять контекстное окно.
+
+---
+
+## 🔍 CI-проверка Traceability Matrix
+
+Для production-использования добавьте GitHub Action, которая проверяет DoD после каждого коммита:
+
+```yaml
+# .github/workflows/traceability-check.yml
+name: Traceability Check
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check orphan tasks
+        run: |
+          # Проверка: все T-NNN в tasks.md ссылаются на FR/NFR/ADR
+          grep -Pzo '(?s)T-\d+.*?(?=- \[ \])' tasks.md | \
+            grep -vP '(FR|NFR|ADR)' && exit 1 || true
+      - name: Check orphan FR
+        run: |
+          # Проверка: каждый FR имеет Task и Test
+          for fr in $(grep -oP 'FR-\d+' specs/*/spec.md); do
+            grep -q "$fr" tasks.md || exit 1
+            grep -q "$fr" test-specs/*/tests.md || exit 1
+          done
+      - name: Check NFR-SEC → TM link
+        run: |
+          # Проверка: каждый NFR-SEC ссылается на TM-NNN
+          grep -oP 'NFR-SEC-\d+' specs/*/spec.md | while read nfr; do
+            grep -q "$nfr" threat-model.md || exit 1
+          done
+```
+
+> Эта проверка превращает Definition of Done из декларации в **проверяемое условие**.
+> Без CI — DoD проверяется вручную при code review.
+
+---
+
+## 🛡️ Conflict Handling: TM vs Observability
+
+Ключевой механизм безопасности — обработка конфликтов между Threat Model и Observability Contract:
+
+| Конфликт | Пример | Решение |
+|----------|--------|---------|
+| PII в телеметрии | TM выявил `user.email` в логе, OC не предусматривает redaction | Добавить NFR-OBS на redaction или убрать поле из логов |
+| Telemetry как вектор | TM выявил утечку через Langfuse SaaS | Добавить TB-05 + шифрование + retention policy |
+| Missing signal | OC требует метрику, TM не видит защиты | Добавить NFR-SEC на защиту метрики |
+| SLO vs constraints | SLO требует OpenTelemetry, constraints запрещает новые зависимости | Запросить разрешение, предложить альтернативу |
+
+> Этот механизм реализован в `system-prompts/M5-threat-model.md` и `M8-tasks-apply-and-traceability.md`.
+> При обнаружении конфликта pipeline **останавливается** и предлагает пользователю выбор решения.

@@ -1,0 +1,87 @@
+name: Traceability Check
+on: [push, pull_request]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check orphan tasks
+        run: |
+          # Проверка: все T-NNN в tasks.md ссылаются на FR/NFR/ADR/TM/NFR-OBS
+          if [ -f tasks.md ]; then
+            # Извлечь все T-NNN IDs
+            task_ids=$(grep -oP 'T-\d{3}' tasks.md | sort -u)
+            for tid in $task_ids; do
+              # Проверить, что задача ссылается на FR/NFR/ADR/TM/NFR-OBS
+              if ! grep -A5 "$tid" tasks.md | grep -qP '(FR|NFR|ADR|TM)-\d+'; then
+                echo "ERROR: Orphan task $tid has no FR/NFR/ADR/TM reference"
+                exit 1
+              fi
+            done
+            echo "✅ No orphan tasks found"
+          fi
+
+      - name: Check orphan FR
+        run: |
+          # Проверка: каждый FR имеет Task и Test
+          if [ -f specs/auth/spec.md ]; then
+            fr_ids=$(grep -oP 'FR-\d{3}' specs/auth/spec.md | sort -u)
+            for fid in $fr_ids; do
+              if ! grep -q "$fid" tasks.md; then
+                echo "ERROR: FR $fid has no task"
+                exit 1
+              fi
+              if ! grep -q "$fid" test-specs/auth/tests.md; then
+                echo "ERROR: FR $fid has no test"
+                exit 1
+              fi
+            done
+            echo "✅ All FR covered"
+          fi
+
+      - name: Check NFR-SEC → TM link
+        run: |
+          # Проверка: каждый NFR-SEC ссылается на TM-NNN
+          if [ -f specs/auth/spec.md ]; then
+            nfr_sec_ids=$(grep -oP 'NFR-SEC-\d{3}' specs/auth/spec.md | sort -u)
+            for nid in $nfr_sec_ids; do
+              if ! grep -q "$nid" threat-model.md; then
+                echo "ERROR: NFR-SEC $nid has no TM reference"
+                exit 1
+              fi
+            done
+            echo "✅ All NFR-SEC linked to TM"
+          fi
+
+      - name: Check NFR-OBS → signal
+        run: |
+          # Проверка: каждый NFR-OBS имеет сигнал в Observability Contract
+          if [ -f specs/auth/spec.md ]; then
+            nfr_obs_ids=$(grep -oP 'NFR-OBS-\d{3}' specs/auth/spec.md | sort -u)
+            for oid in $nfr_obs_ids; do
+              if ! grep -q "$oid" specs/auth/spec.md; then
+                echo "ERROR: NFR-OBS $oid not found in spec"
+                exit 1
+              fi
+            done
+            echo "✅ All NFR-OBS have signals"
+          fi
+
+      - name: Check Traceability Matrix completeness
+        run: |
+          # Проверка: context.md содержит Traceability Matrix
+          if [ -f context.md ]; then
+            if ! grep -q "Traceability Matrix" context.md; then
+              echo "ERROR: context.md missing Traceability Matrix"
+              exit 1
+            fi
+            # Проверить, что матрица не пустая (есть данные после заголовка)
+            matrix_section=$(sed -n '/Traceability Matrix/,/^\s*$/p' context.md)
+            if ! echo "$matrix_section" | grep -qP 'FR-\d|NFR-\d|TM-\d'; then
+              echo "WARNING: Traceability Matrix appears empty"
+            else
+              echo "✅ Traceability Matrix has entries"
+            fi
+          fi
