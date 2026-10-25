@@ -1,3 +1,4 @@
+![Status](https://img.shields.io/badge/status-production--ready-green)
 # AI-SDLC-SDD: Spec-Driven Development с Threat Modeling и Observability by Design
 
 Репозиторий проекта **AI-SDLC-SDD**, посвященного методологии спецификационно-ориентированной разработки (Spec-Driven Development, SDD) с использованием искусственного интеллекта.
